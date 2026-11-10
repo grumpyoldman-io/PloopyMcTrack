@@ -1,0 +1,62 @@
+diff --git a/quantum/digitizer_mouse_fallback.c b/quantum/digitizer_mouse_fallback.c
+index b2ec93ab..ca0b4eac 100644
+--- a/quantum/digitizer_mouse_fallback.c
++++ b/quantum/digitizer_mouse_fallback.c
+@@ -28,6 +28,12 @@
+ #        define DIGITIZER_MOUSE_TAP_HOLD_MS DIGITIZER_MOUSE_TAP_DETECTION_TIMEOUT
+ #    endif
+ 
++/* Longest the finger may stay back down after a tap and still count as
++ * the next tap of a double/triple tap (beyond this it is tap-and-drag). */
++#    ifndef DIGITIZER_MOUSE_RETAP_HOLD_MS
++#        define DIGITIZER_MOUSE_RETAP_HOLD_MS 250
++#    endif
++
+ /* Two-finger tap judged at lift: window measured from when the PAIR
+  * formed (not the first finger), so a staggered second finger still
+  * right-clicks. Wider than the one-finger window, like Apple. */
+@@ -1436,18 +1442,39 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
+         }
+         case DoubleTapped:
+         case Tapped: {
++            /* After a tap the finger has DIGITIZER_MOUSE_TAP_DETECTION_TIMEOUT
++             * to come back. Once back, a quick lift is the next tap of a
++             * double/triple tap; holding or moving is tap-and-drag. The
++             * stock logic required the whole second tap (down AND up) to
++             * finish inside that window, which relaxed double taps miss:
++             * logged gaps of ~90 ms plus ~70-100 ms touches. */
++            static uint32_t retouch_t = 0;
++            static uint16_t retouch_x = 0, retouch_y = 0;
+             tap_contacts = MAX(contacts, tap_contacts);
++            if (contacts > 0 && last_contacts == 0) {
++                retouch_t = timer_read32() | 1;
++                retouch_x = x;
++                retouch_y = y;
++            }
+             if (contacts == 0 && last_contacts != contacts) {
+                 tap_count++;
+                 state              = DoubleTapped;
+                 contact_start_time = timer_read32();
+-            } else if (duration > DIGITIZER_MOUSE_TAP_DETECTION_TIMEOUT) {
+-                if (contacts > 0 && state == Tapped) {
+-                    state = Drag;
+-                } else {
++                retouch_t          = 0;
++            } else if (contacts > 0 && retouch_t != 0) {
++                const bool held  = timer_elapsed32(retouch_t) > DIGITIZER_MOUSE_RETAP_HOLD_MS;
++                const bool moved = abs((int)x - retouch_x) > DIGITIZER_MOUSE_TAP_DISTANCE || abs((int)y - retouch_y) > DIGITIZER_MOUSE_TAP_DISTANCE;
++                if (state == Tapped && (held || moved)) {
++                    state     = Drag;
++                    retouch_t = 0;
++                } else if (state == DoubleTapped && held) {
+                     tap_count++;
+-                    state = Finished;
++                    state     = Finished;
++                    retouch_t = 0;
+                 }
++            } else if (contacts == 0 && duration > DIGITIZER_MOUSE_TAP_DETECTION_TIMEOUT) {
++                tap_count++;
++                state = Finished;
+             }
+             break;
+         }

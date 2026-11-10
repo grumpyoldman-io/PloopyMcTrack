@@ -1,0 +1,5 @@
+build/*.uf2
+.qmk_firmware/
+*.uf2
+!stock/*.uf2
+.build/

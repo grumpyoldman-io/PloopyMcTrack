@@ -1,0 +1,95 @@
+diff --git a/quantum/digitizer_mouse_fallback.c b/quantum/digitizer_mouse_fallback.c
+index 5e677acf..8efad187 100644
+--- a/quantum/digitizer_mouse_fallback.c
++++ b/quantum/digitizer_mouse_fallback.c
+@@ -166,6 +166,26 @@ static inline uint32_t fb_elapsed32(uint32_t t) {
+ /* Launch velocity ceiling, clicks/s x16. The old 992 (62 clicks/s) was
+  * below even a gentle drag, so every gesture launched at exactly the
+  * same speed and the fling carried no information about the gesture. */
++/* Scroll acceleration, as on Apple trackpads: slow finger movement
++ * scrolls at the base rate (travel / divisor) for precision, faster
++ * movement gets proportionally more, up to DIGITIZER_SCROLL_ACCEL_MAX
++ * times. Momentum launches from the emitted rate, so a fast flick also
++ * coasts further and takes longer to stop. Speeds are filtered finger
++ * (centroid) speed in sensor units/s; logged scrolling on a Pavonis ran
++ * at a median of 3500-7300, with flick peaks of 14000-29000. */
++#    ifndef DIGITIZER_SCROLL_ACCEL_MAX
++#        define DIGITIZER_SCROLL_ACCEL_MAX 1.0f /* 1 = off */
++#    endif
++#    ifndef DIGITIZER_SCROLL_ACCEL_LO
++#        define DIGITIZER_SCROLL_ACCEL_LO 5000.0f /* below this speed: base rate */
++#    endif
++#    ifndef DIGITIZER_SCROLL_ACCEL_HI
++#        define DIGITIZER_SCROLL_ACCEL_HI 30000.0f /* at and above this speed: full gain */
++#    endif
++#    ifndef DIGITIZER_SCROLL_ACCEL_TAU_MS
++#        define DIGITIZER_SCROLL_ACCEL_TAU_MS 30.0f /* smoothing of the speed estimate */
++#    endif
++
+ #    ifndef DIGITIZER_COAST_MAX_V16
+ #        define DIGITIZER_COAST_MAX_V16 32000
+ #    endif
+@@ -612,6 +632,9 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
+     static int      scr_cand_x = 0, scr_cand_y = 0;
+     static uint32_t scr_still_t = 0;
+     static int      coast_v16h = 0, coast_v16v = 0; /* scroll velocity, clicks/s x16 */
++    static float    sa_v = 0.0f;               /* scroll acceleration: filtered centroid speed, units/s */
++    static uint32_t sa_t = 0;                  /* time of the previous centroid change */
++    static float    sa_rh = 0.0f, sa_rv = 0.0f; /* fractional travel carried after gain */
+     static uint32_t tri_t = 0; /* when a third contact first appeared */
+     static int      down2_cx = 0, down2_cy = 0; /* centroid at 2-finger placement */
+     static bool     down2_set = false;
+@@ -1275,6 +1298,11 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
+                     pinch_gap = gap;
+                 }
+                 if (sc_n != contacts) {
++                    if (sc_n == 0) {
++                        sa_v  = 0.0f;
++                        sa_t  = timer_read32();
++                        sa_rh = sa_rv = 0.0f;
++                    }
+                     sc_n        = contacts;
+                     sc_cx       = cx;
+                     sc_cy       = cy;
+@@ -1314,8 +1342,30 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
+                  * zoom start out as a scroll. Nothing is lost, the travel
+                  * is still accumulated below on the very next report. */
+                 if (!scr_anch && !pinch_lock && !(contacts == 2 && two_class == TWO_UNDECIDED)) {
+-                    scroll_acc_h += (cx - sc_cx) * DIGITIZER_SCROLL_SCALE;
+-                    scroll_acc_v += (cy - sc_cy) * DIGITIZER_SCROLL_SCALE;
++                    const int sdx = cx - sc_cx;
++                    const int sdy = cy - sc_cy;
++                    float     sg  = 1.0f;
++                    if (DIGITIZER_SCROLL_ACCEL_MAX > 1.0f) {
++                        if (sdx || sdy) {
++                            float dtm = (float)fb_elapsed32(sa_t);
++                            if (dtm < 1.0f) dtm = 1.0f;
++                            if (dtm > 100.0f) dtm = 100.0f;
++                            const float vi = sqrtf((float)(sdx * sdx + sdy * sdy)) * 1000.0f / dtm;
++                            sa_v += (dtm / (dtm + DIGITIZER_SCROLL_ACCEL_TAU_MS)) * (vi - sa_v);
++                            sa_t = timer_read32();
++                        }
++                        float k = (sa_v - DIGITIZER_SCROLL_ACCEL_LO) / (DIGITIZER_SCROLL_ACCEL_HI - DIGITIZER_SCROLL_ACCEL_LO);
++                        k  = k < 0.0f ? 0.0f : k > 1.0f ? 1.0f : k;
++                        sg = 1.0f + (DIGITIZER_SCROLL_ACCEL_MAX - 1.0f) * k;
++                    }
++                    sa_rh += (float)(sdx * DIGITIZER_SCROLL_SCALE) * sg;
++                    sa_rv += (float)(sdy * DIGITIZER_SCROLL_SCALE) * sg;
++                    const int ih = (int)sa_rh;
++                    const int iv = (int)sa_rv;
++                    sa_rh -= (float)ih;
++                    sa_rv -= (float)iv;
++                    scroll_acc_h += ih;
++                    scroll_acc_v += iv;
+                     /* a MERGED blob that keeps travelling keeps the scroll
+                      * alive: control returns to the pointer on stillness
+                      * or lift, never mid-motion (no cursor jumping out of
+@@ -1330,7 +1380,7 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
+                  * 6 clicks a fast report carrying ~50 units was clamped to
+                  * 18 and roughly two thirds of the motion was thrown away.
+                  * That is why fast scrolling under-tracked the finger. */
+-                const int acc_max = DIGITIZER_SCROLL_RESERVOIR_CLICKS * (int)digitizer_scroll_divisor;
++                const int acc_max = (int)(DIGITIZER_SCROLL_RESERVOIR_CLICKS * (int)digitizer_scroll_divisor * DIGITIZER_SCROLL_ACCEL_MAX);
+                 if (scroll_acc_h > acc_max) scroll_acc_h = acc_max;
+                 if (scroll_acc_h < -acc_max) scroll_acc_h = -acc_max;
+                 if (scroll_acc_v > acc_max) scroll_acc_v = acc_max;

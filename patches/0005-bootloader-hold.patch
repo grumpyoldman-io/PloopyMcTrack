@@ -1,0 +1,38 @@
+diff --git a/drivers/sensors/maxtouch.c b/drivers/sensors/maxtouch.c
+index 1b2725bb..c345d8f9 100644
+--- a/drivers/sensors/maxtouch.c
++++ b/drivers/sensors/maxtouch.c
+@@ -71,6 +71,10 @@ extern bool digitizer_gesture_trace; /* VIA Trackpad tab: Gesture logging */
+ // eagerly - close fingers become one blob (breaking two-finger scroll
+ // and taps); raising it keeps them separate. Too high risks splitting
+ // one real finger into phantom twins.
++#ifndef MAXTOUCH_BOOTLOADER_HOLD_MS
++#    define MAXTOUCH_BOOTLOADER_HOLD_MS 1500 // all contacts held this long to reboot into the bootloader
++#endif
++
+ #ifndef MXT_MERGE_THRESHOLD
+ #    define MXT_MERGE_THRESHOLD 5
+ #endif
+@@ -567,9 +571,19 @@ digitizer_t maxtouch_get_report(digitizer_t digitizer_report) {
+                 if (message.report_id == t100_first_report_id) {
+                     const uint8_t  fingers  = message.data[1];
+ #ifdef MAXTOUCH_BOOTLOADER_GESTURE
+-                    // Debug feature - reboot to bootloader if 5 fingers are MXT_DOWN
+-                    // TODO: A better gesture.
+-                    if (fingers == DIGITIZER_CONTACT_COUNT) reset_keyboard();
++                    // Reboot to bootloader when every contact slot is down and
++                    // stays down. The stock check fired on the first report with
++                    // five contacts, and a resting hand reaches that by accident
++                    // (logged: 4 contacts, then 5, mid-use).
++                    {
++                        static uint32_t all_down_t = 0;
++                        if (fingers == DIGITIZER_CONTACT_COUNT) {
++                            if (all_down_t == 0) all_down_t = timer_read32() | 1;
++                            else if (timer_read32() - all_down_t >= MAXTOUCH_BOOTLOADER_HOLD_MS && timer_read32() - all_down_t < 0x80000000u) reset_keyboard();
++                        } else {
++                            all_down_t = 0;
++                        }
++                    }
+ #endif
+                     if (fingers == 0) {
+                         // Belt and braces, make sure we dont have any stuck contacts

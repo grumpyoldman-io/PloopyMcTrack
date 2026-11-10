@@ -1,0 +1,237 @@
+diff --git a/drivers/sensors/maxtouch.c b/drivers/sensors/maxtouch.c
+index 7e8a3e5f..1b2725bb 100644
+--- a/drivers/sensors/maxtouch.c
++++ b/drivers/sensors/maxtouch.c
+@@ -533,6 +533,7 @@ void maxtouch_init(void) {
+ // to avoid diffing positions across a lift/re-touch (contact flicker
+ // teleports the centroid; a delta across it is a phantom cursor jump).
+ uint32_t maxtouch_contact_downs = 0;
++uint8_t  maxtouch_contact_amp[DIGITIZER_CONTACT_COUNT] = {0};
+ 
+ // Store state different from report so we can report MXT_DOWNUP as MXT_DOWN, but remember we are MXT_UP
+ digitizer_t maxtouch_get_report(digitizer_t digitizer_report) {
+@@ -605,6 +606,7 @@ digitizer_t maxtouch_get_report(digitizer_t digitizer_report) {
+                     const uint16_t x          = message.data[1] | (message.data[2] << 8);
+                     const uint16_t y          = message.data[3] | (message.data[4] << 8);
+                     const uint8_t  ampl       = message.data[5];
++                    if (contact_id < DIGITIZER_CONTACT_COUNT) maxtouch_contact_amp[contact_id] = ampl;
+ #ifdef DIGITIZER_REPORT_FINGER_SIZE
+                     digitizer_report.contacts[contact_id].width = message.data[6];
+                     digitizer_report.contacts[contact_id].height = message.data[7];
+diff --git a/quantum/digitizer_mouse_fallback.c b/quantum/digitizer_mouse_fallback.c
+index fea5f689..b2ec93ab 100644
+--- a/quantum/digitizer_mouse_fallback.c
++++ b/quantum/digitizer_mouse_fallback.c
+@@ -452,6 +452,80 @@ static void oe_drain_replay(float *acc, float motion, float *out_ref) {
+     *out_ref -= step;
+ }
+ 
++#    ifdef DIGITIZER_FORCE_CLICK
++/* Force click: a firm press clicks, a light touch only points, as on a
++ * built-in trackpad. The maXTouch has no force sensor; it reports each
++ * contact's signal amplitude, which rises when a pressed fingertip
++ * flattens against the glass.
++ *
++ * Like Apple's click setting, ONE threshold separates light from firm:
++ * DIGITIZER_FORCE_CLICK_PCT above the user's light-touch level. Crossing
++ * it while the finger is nearly still clicks; the button then stays held
++ * through whatever follows (a drag, a selection), even at lighter
++ * pressure, until the signal falls back to the light level or the
++ * finger lifts.
++ *
++ * The light level is learned, not fixed: amplitude depends on skin,
++ * finger and grounding, and drifts from session to session. It is a
++ * running MEDIAN of moving, unpressed touches (a fixed-rate step toward
++ * each sample), ignoring samples already well above it. A plain average
++ * drifted upward in testing, because a press-and-drag is a moving, firm
++ * finger before the press registers, and each one raised the threshold
++ * until selections stopped registering. */
++#        ifndef DIGITIZER_FORCE_CLICK_PCT
++#            define DIGITIZER_FORCE_CLICK_PCT 28 /* THE click force: % above the light-touch level */
++#        endif
++#        ifndef DIGITIZER_FORCE_CONFIRM_MS
++#            define DIGITIZER_FORCE_CONFIRM_MS 40 /* held above the threshold this long to click */
++#        endif
++#        ifndef DIGITIZER_FORCE_MIN_MS
++#            define DIGITIZER_FORCE_MIN_MS 30 /* ignore the first moments of touchdown */
++#        endif
++#        ifndef DIGITIZER_FORCE_RELEASE_PCT
++#            define DIGITIZER_FORCE_RELEASE_PCT 0 /* release: back to within this % of the light level... */
++#        endif
++#        ifndef DIGITIZER_FORCE_RELEASE_MS
++#            define DIGITIZER_FORCE_RELEASE_MS 80 /* ...for this long (outlasts electrode-crossing dips) */
++#        endif
++/* Settle-then-press: a press only counts once the finger has come to
++ * rest. Recent movement is a running total of finger travel that fades
++ * with this time constant. Measured over 19 logged presses: deliberate
++ * presses scored 0-37, accidental ones (a light move slowing down onto
++ * a target, already under the speed limit below) 96-252. */
++#        ifndef DIGITIZER_FORCE_STILL_TAU_MS
++#            define DIGITIZER_FORCE_STILL_TAU_MS 100.0f
++#        endif
++#        ifndef DIGITIZER_FORCE_STILL_UNITS
++#            define DIGITIZER_FORCE_STILL_UNITS 60.0f /* max recent movement (sensor units) to press */
++#        endif
++#        ifndef DIGITIZER_FORCE_MAX_SPEED
++#            define DIGITIZER_FORCE_MAX_SPEED 3000.0f /* filtered finger speed (units/s) above which presses are ignored */
++#        endif
++#        ifndef DIGITIZER_FORCE_LIGHT_INIT
++#            define DIGITIZER_FORCE_LIGHT_INIT 38.0f /* light level before any pointing has been seen */
++#        endif
++#        ifndef DIGITIZER_FORCE_LIGHT_SETTLE_MS
++#            define DIGITIZER_FORCE_LIGHT_SETTLE_MS 150 /* don't learn from the touchdown ramp */
++#        endif
++#        ifndef DIGITIZER_FORCE_LIGHT_STEP
++#            define DIGITIZER_FORCE_LIGHT_STEP 4.0f /* counts per second the light level may move */
++#        endif
++#        ifndef DIGITIZER_FORCE_LIGHT_EXCLUDE_PCT
++#            define DIGITIZER_FORCE_LIGHT_EXCLUDE_PCT 15 /* ignore samples this far above the light level */
++#        endif
++#        ifndef DIGITIZER_FORCE_LIGHT_MIN
++#            define DIGITIZER_FORCE_LIGHT_MIN 30.0f
++#        endif
++#        ifndef DIGITIZER_FORCE_LIGHT_MAX
++#            define DIGITIZER_FORCE_LIGHT_MAX 46.0f
++#        endif
++bool digitizer_force_click = true;
++/* Called on every force press and release, e.g. to pulse a haptic motor. */
++__attribute__((weak)) void digitizer_force_click_changed(bool pressed, uint8_t buttons) {}
++#    endif
++// Per-contact amplitude from the maxtouch driver (weak default otherwise).
++__attribute__((weak)) uint8_t maxtouch_contact_amp[DIGITIZER_CONTACT_COUNT] = {0};
++
+ // The gesture detection state machine will transition between these states.
+ typedef enum { None, Down, MoveScroll, Tapped, DoubleTapped, Drag, Swipe, Finished } State;
+ 
+@@ -658,6 +732,101 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
+         pp_valid = false;
+     }
+     prev_n = contacts;
++#    ifdef DIGITIZER_FORCE_CLICK
++    static bool     fc_pressed     = false; /* force button currently held */
++    static bool     fc_used        = false; /* a force press happened this touch: suppress tap-to-click */
++    static uint8_t  fc_buttons     = 0;
++    static float    fc_light       = DIGITIZER_FORCE_LIGHT_INIT; /* learned light-touch amplitude, kept across touches */
++    static float    fc_release_lvl = 0.0f;
++    static uint32_t fc_t0 = 0, fc_t_last = 0;
++    static uint32_t fc_up_t = 0, fc_dn_t = 0; /* when the amplitude crossed the click / release level; 0 = not crossed */
++    static int      fc_prev_n      = 0;
++    static bool     fc_skip_logged = false; /* trace: one skip line per crossing, not one per tick */
++    static float    fc_move        = 0.0f;  /* recent finger travel, fading (settle-then-press) */
++    static uint16_t fc_lx = 0, fc_ly = 0;
++    static bool     fc_multi       = false; /* this touch has had 2+ fingers: scroll/right-click territory, never a force press */
++    {
++        int amp = 0;
++        for (int i = 0; i < DIGITIZER_FINGER_COUNT; i++) {
++            if (report->fingers[i].tip) {
++                const int a = maxtouch_contact_amp[report->fingers[i].contact_id];
++                if (a > amp) amp = a;
++            }
++        }
++        const uint32_t now = timer_read32();
++        const float    dt  = (float)MIN(timer_elapsed32(fc_t_last), 100);
++        const float    spd = sqrtf(oe_dx * oe_dx + oe_dy * oe_dy);
++        if (contacts > 0 && fc_prev_n > 0) {
++            fc_move *= expf(-dt / DIGITIZER_FORCE_STILL_TAU_MS);
++            fc_move += sqrtf((float)((int)x - fc_lx) * ((int)x - fc_lx) + (float)((int)y - fc_ly) * ((int)y - fc_ly));
++        } else {
++            fc_move = 0.0f;
++        }
++        fc_lx = x;
++        fc_ly = y;
++        if (contacts == 0) {
++            if (fc_pressed) {
++                fc_pressed = false;
++                digitizer_force_click_changed(false, fc_buttons);
++                if (digitizer_gesture_trace) uprintf("FRC rel lift\n");
++            }
++            fc_up_t = fc_dn_t = 0;
++        } else if (fc_prev_n == 0) {
++            fc_t0    = now;
++            fc_used  = false;
++            fc_multi = contacts >= 2;
++            fc_up_t = fc_dn_t = 0;
++        } else if (!fc_pressed) {
++            const uint32_t el = timer_elapsed32(fc_t0);
++            if (contacts >= 2) fc_multi = true;
++            if (el >= DIGITIZER_FORCE_LIGHT_SETTLE_MS && spd > DIGITIZER_FORCE_MAX_SPEED && amp * 100 < (int)(fc_light * (100 + DIGITIZER_FORCE_LIGHT_EXCLUDE_PCT))) {
++                /* a moving, unpressed finger is a light touch: track its median */
++                const float step = DIGITIZER_FORCE_LIGHT_STEP * dt / 1000.0f;
++                if ((float)amp > fc_light) fc_light += step;
++                else if ((float)amp < fc_light) fc_light -= step;
++                fc_light = CLIP(fc_light, DIGITIZER_FORCE_LIGHT_MIN, DIGITIZER_FORCE_LIGHT_MAX);
++            }
++            const bool firm = el >= DIGITIZER_FORCE_MIN_MS && amp * 100 >= (int)(fc_light * (100 + DIGITIZER_FORCE_CLICK_PCT));
++            const bool still = spd <= DIGITIZER_FORCE_MAX_SPEED && fc_move <= DIGITIZER_FORCE_STILL_UNITS;
++            /* Two fingers land for a scroll stronger than one and a press
++             * there fired before the fingers had moved (logged); two-finger
++             * TAP is the right click. Taps of a double/triple tap belong to
++             * the tap engine. */
++            const bool allowed = !fc_multi && (state == None || state == Down || state == MoveScroll);
++            if (firm && digitizer_force_click && still && allowed) {
++                if (fc_up_t == 0) {
++                    fc_up_t = now | 1;
++                } else if (timer_elapsed32(fc_up_t) >= DIGITIZER_FORCE_CONFIRM_MS) {
++                    fc_pressed     = true;
++                    fc_used        = true;
++                    fc_release_lvl = fc_light * (100 + DIGITIZER_FORCE_RELEASE_PCT) / 100.0f;
++                    fc_buttons     = contacts >= 2 ? 0x2 : 0x1;
++                    fc_dn_t        = 0;
++                    digitizer_force_click_changed(true, fc_buttons);
++                    if (digitizer_gesture_trace) uprintf("FRC press amp=%d light=%d el=%lu spd=%d mv=%d n=%d\n", amp, (int)fc_light, el, (int)spd, (int)fc_move, contacts);
++                }
++            } else {
++                if (firm && digitizer_gesture_trace && !fc_skip_logged) uprintf("FRC skip amp=%d light=%d spd=%d mv=%d\n", amp, (int)fc_light, (int)spd, (int)fc_move);
++                fc_skip_logged = firm;
++                fc_up_t        = 0;
++            }
++        } else if ((float)amp <= fc_release_lvl) {
++            if (fc_dn_t == 0) {
++                fc_dn_t = now | 1;
++            } else if (timer_elapsed32(fc_dn_t) >= DIGITIZER_FORCE_RELEASE_MS) {
++                fc_pressed = false;
++                digitizer_force_click_changed(false, fc_buttons);
++                if (digitizer_gesture_trace) uprintf("FRC rel amp=%d light=%d\n", amp, (int)fc_light);
++            }
++        } else {
++            fc_dn_t = 0;
++        }
++        fc_t_last = now;
++        fc_prev_n = contacts;
++    }
++#    else
++    const bool fc_used = false;
++#    endif
+     const bool tri_sustained = tri_t != 0 && timer_elapsed32(tri_t) > 40;
+     /* A real three-finger swipe has its third finger down near the
+      * GESTURE start; a phantom third contact materializes mid-scroll
+@@ -728,7 +897,9 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
+             }
+             tap_contacts              = MAX(contacts, tap_contacts);
+ 
+-            if (contacts == 0) {
++            if (contacts == 0 && fc_used) {
++                state = None; /* the press already clicked */
++            } else if (contacts == 0) {
+                 state              = Tapped;
+                 contact_start_time = timer_read32();
+                 if (digitizer_gesture_trace) uprintf("TAPJ down tc=%d dur=%lu -> tap\n", tap_contacts, duration);
+@@ -772,7 +943,7 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
+                  * promoted to MoveScroll, which used to silently eat the
+                  * tap. Judge at lift, like Apple: brief touch, nothing
+                  * scrolled - it was a right-click tap all along. */
+-                if (prior == MoveScroll && tap_contacts == 2 && !scroll_clicked && pair_t != 0 && timer_elapsed32(pair_t) < DIGITIZER_MOUSE_TAP_SALVAGE_MS && pair_dev2 < (2 * DIGITIZER_MOUSE_TAP_DISTANCE) * (2 * DIGITIZER_MOUSE_TAP_DISTANCE)) {
++                if (prior == MoveScroll && !fc_used && tap_contacts == 2 && !scroll_clicked && pair_t != 0 && timer_elapsed32(pair_t) < DIGITIZER_MOUSE_TAP_SALVAGE_MS && pair_dev2 < (2 * DIGITIZER_MOUSE_TAP_DISTANCE) * (2 * DIGITIZER_MOUSE_TAP_DISTANCE)) {
+                     state              = Tapped;
+                     contact_start_time = timer_read32();
+                 }
+@@ -1405,6 +1576,9 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
+         }
+     }
+     const bool button_pressed = tap || (state == Drag);
++#    ifdef DIGITIZER_FORCE_CLICK
++    if (fc_pressed) mouse_report.buttons |= fc_buttons;
++#    endif
+     if (report->button1 || (tap_contacts == 1 && button_pressed) || seldrag_live) {
+         mouse_report.buttons |= 0x1;
+         if (digitizer_taps_as_clicks) report->button1 = 1;

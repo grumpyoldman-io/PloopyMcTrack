@@ -1,0 +1,205 @@
+diff --git a/quantum/digitizer_mouse_fallback.c b/quantum/digitizer_mouse_fallback.c
+index ca0b4eac..5e677acf 100644
+--- a/quantum/digitizer_mouse_fallback.c
++++ b/quantum/digitizer_mouse_fallback.c
+@@ -15,6 +15,18 @@
+ #    include "timer.h"
+ #    include "action.h"
+ 
++/* Elapsed time that tolerates a start time slightly in the future.
++ * This file marks "timer running" by storing timer_read32() | 1, so a
++ * stored time can be 1 ms ahead of the clock; plain timer_elapsed32()
++ * then wraps to ~49 days whenever it is checked in the same millisecond,
++ * and every "held longer than X" test passes at once. Measured effect:
++ * double taps turned into tap-and-drag on the second touch's first
++ * report. Treat any negative interval as zero. */
++static inline uint32_t fb_elapsed32(uint32_t t) {
++    const uint32_t e = timer_read32() - t;
++    return e > 0x80000000u ? 0 : e;
++}
++
+ #    ifndef DIGITIZER_MOUSE_TAP_DETECTION_TIMEOUT
+ #        define DIGITIZER_MOUSE_TAP_DETECTION_TIMEOUT 150
+ #    endif
+@@ -614,7 +626,7 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
+     uint16_t  x                        = 0;
+     uint16_t  y                        = 0;
+     bool      scroll_branch_live       = false; /* this call routed a contact through the scroll path */
+-    const uint32_t  duration           = timer_elapsed32(contact_start_time);
++    const uint32_t  duration           = fb_elapsed32(contact_start_time);
+     int             contacts           = 0;
+ 
+ #if defined(DIGITIZER_REPORT_FINGER_PRESSURE) || defined(DIGITIZER_REPORT_FINGER_SIZE)
+@@ -760,7 +772,7 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
+             }
+         }
+         const uint32_t now = timer_read32();
+-        const float    dt  = (float)MIN(timer_elapsed32(fc_t_last), 100);
++        const float    dt  = (float)MIN(fb_elapsed32(fc_t_last), 100);
+         const float    spd = sqrtf(oe_dx * oe_dx + oe_dy * oe_dy);
+         if (contacts > 0 && fc_prev_n > 0) {
+             fc_move *= expf(-dt / DIGITIZER_FORCE_STILL_TAU_MS);
+@@ -783,7 +795,7 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
+             fc_multi = contacts >= 2;
+             fc_up_t = fc_dn_t = 0;
+         } else if (!fc_pressed) {
+-            const uint32_t el = timer_elapsed32(fc_t0);
++            const uint32_t el = fb_elapsed32(fc_t0);
+             if (contacts >= 2) fc_multi = true;
+             if (el >= DIGITIZER_FORCE_LIGHT_SETTLE_MS && spd > DIGITIZER_FORCE_MAX_SPEED && amp * 100 < (int)(fc_light * (100 + DIGITIZER_FORCE_LIGHT_EXCLUDE_PCT))) {
+                 /* a moving, unpressed finger is a light touch: track its median */
+@@ -802,7 +814,7 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
+             if (firm && digitizer_force_click && still && allowed) {
+                 if (fc_up_t == 0) {
+                     fc_up_t = now | 1;
+-                } else if (timer_elapsed32(fc_up_t) >= DIGITIZER_FORCE_CONFIRM_MS) {
++                } else if (fb_elapsed32(fc_up_t) >= DIGITIZER_FORCE_CONFIRM_MS) {
+                     fc_pressed     = true;
+                     fc_used        = true;
+                     fc_release_lvl = fc_light * (100 + DIGITIZER_FORCE_RELEASE_PCT) / 100.0f;
+@@ -819,7 +831,7 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
+         } else if ((float)amp <= fc_release_lvl) {
+             if (fc_dn_t == 0) {
+                 fc_dn_t = now | 1;
+-            } else if (timer_elapsed32(fc_dn_t) >= DIGITIZER_FORCE_RELEASE_MS) {
++            } else if (fb_elapsed32(fc_dn_t) >= DIGITIZER_FORCE_RELEASE_MS) {
+                 fc_pressed = false;
+                 digitizer_force_click_changed(false, fc_buttons);
+                 if (digitizer_gesture_trace) uprintf("FRC rel amp=%d light=%d\n", amp, (int)fc_light);
+@@ -833,7 +845,7 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
+ #    else
+     const bool fc_used = false;
+ #    endif
+-    const bool tri_sustained = tri_t != 0 && timer_elapsed32(tri_t) > 40;
++    const bool tri_sustained = tri_t != 0 && fb_elapsed32(tri_t) > 40;
+     /* A real three-finger swipe has its third finger down near the
+      * GESTURE start; a phantom third contact materializes mid-scroll
+      * (measured: noise-conjured swipes firing Spaces during long
+@@ -941,7 +953,7 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
+                 /* coast only engages when the fingers left MID-MOTION:
+                  * a gesture that stopped before lifting has a stale last
+                  * click and must leave no momentum */
+-                if (timer_elapsed32(scroll_click_t) > 250) {
++                if (fb_elapsed32(scroll_click_t) > 250) {
+                     coast_v16h = 0;
+                     coast_v16v = 0;
+                 }
+@@ -949,14 +961,14 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
+                  * promoted to MoveScroll, which used to silently eat the
+                  * tap. Judge at lift, like Apple: brief touch, nothing
+                  * scrolled - it was a right-click tap all along. */
+-                if (prior == MoveScroll && !fc_used && tap_contacts == 2 && !scroll_clicked && pair_t != 0 && timer_elapsed32(pair_t) < DIGITIZER_MOUSE_TAP_SALVAGE_MS && pair_dev2 < (2 * DIGITIZER_MOUSE_TAP_DISTANCE) * (2 * DIGITIZER_MOUSE_TAP_DISTANCE)) {
++                if (prior == MoveScroll && !fc_used && tap_contacts == 2 && !scroll_clicked && pair_t != 0 && fb_elapsed32(pair_t) < DIGITIZER_MOUSE_TAP_SALVAGE_MS && pair_dev2 < (2 * DIGITIZER_MOUSE_TAP_DISTANCE) * (2 * DIGITIZER_MOUSE_TAP_DISTANCE)) {
+                     state              = Tapped;
+                     contact_start_time = timer_read32();
+                 }
+-                if (digitizer_gesture_trace) uprintf("TAPJ lift tc=%d sc=%d dur=%lu pe=%lu -> %s\n", tap_contacts, (int)scroll_clicked, duration, pair_t ? timer_elapsed32(pair_t) : 0, state == Tapped ? "tap" : "miss");
+-            } else if (contacts == 1 && (scr_lift || (!scr_esc && !(tap_contacts >= 2 && duration < 500 && two_seen_t != 0 && timer_elapsed32(two_seen_t) < DIGITIZER_MOUSE_MERGE_SCROLL_MS) && !(touch_click_t != 0 && timer_elapsed32(touch_click_t) < DIGITIZER_MOUSE_RESCROLL_MS && abs((int)x - sc_cx) < DIGITIZER_MOUSE_RESCROLL_UNITS && abs((int)y - sc_cy) < DIGITIZER_MOUSE_RESCROLL_UNITS)))) {
+-                if (digitizer_gesture_trace && touch_click_t != 0 && timer_elapsed32(touch_click_t) < 1500) {
+-                    uprintf("RSC miss dt=%lu dx=%d dy=%d esc=%d tc=%d\n", timer_elapsed32(touch_click_t), (int)x - sc_cx, (int)y - sc_cy, (int)scr_esc, tap_contacts);
++                if (digitizer_gesture_trace) uprintf("TAPJ lift tc=%d sc=%d dur=%lu pe=%lu -> %s\n", tap_contacts, (int)scroll_clicked, duration, pair_t ? fb_elapsed32(pair_t) : 0, state == Tapped ? "tap" : "miss");
++            } else if (contacts == 1 && (scr_lift || (!scr_esc && !(tap_contacts >= 2 && duration < 500 && two_seen_t != 0 && fb_elapsed32(two_seen_t) < DIGITIZER_MOUSE_MERGE_SCROLL_MS) && !(touch_click_t != 0 && fb_elapsed32(touch_click_t) < DIGITIZER_MOUSE_RESCROLL_MS && abs((int)x - sc_cx) < DIGITIZER_MOUSE_RESCROLL_UNITS && abs((int)y - sc_cy) < DIGITIZER_MOUSE_RESCROLL_UNITS)))) {
++                if (digitizer_gesture_trace && touch_click_t != 0 && fb_elapsed32(touch_click_t) < 1500) {
++                    uprintf("RSC miss dt=%lu dx=%d dy=%d esc=%d tc=%d\n", fb_elapsed32(touch_click_t), (int)x - sc_cx, (int)y - sc_cy, (int)scr_esc, tap_contacts);
+                 }
+                 /* scr_esc alone is decisive: an ENGAGED scroll stays a
+                  * scroll until every finger lifts, like Apple - a touch
+@@ -1085,7 +1097,7 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
+                      * break: a scroll must never begin or end with a pointer
+                      * jump. Travel accumulated during grace replays through
+                      * the normal motion-masked breakout afterward. */
+-                    const bool tf_grace = duration < DIGITIZER_MOUSE_TOUCH_GRACE_MS || timer_elapsed32(scroll_last_t) < DIGITIZER_MOUSE_SCROLL_END_GRACE_MS || (two_seen_t != 0 && timer_elapsed32(two_seen_t) < DIGITIZER_MOUSE_SCROLL_END_GRACE_MS);
++                    const bool tf_grace = duration < DIGITIZER_MOUSE_TOUCH_GRACE_MS || fb_elapsed32(scroll_last_t) < DIGITIZER_MOUSE_SCROLL_END_GRACE_MS || (two_seen_t != 0 && fb_elapsed32(two_seen_t) < DIGITIZER_MOUSE_SCROLL_END_GRACE_MS);
+                     if (one_euro_rest_clamp && rc_anchored) {
+                         const float ex = oe_x - rc_ax;
+                         const float ey = oe_y - rc_ay;
+@@ -1105,7 +1117,7 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
+                             /* absorb: emit nothing, let the anchor slowly
+                              * follow sensor walks so they never accumulate
+                              * into a spurious breakout */
+-                            if (timer_elapsed32(rc_leak_t) >= ONE_EURO_REST_LEAK_MS) {
++                            if (fb_elapsed32(rc_leak_t) >= ONE_EURO_REST_LEAK_MS) {
+                                 rc_leak_t = now;
+                                 if (ex > 0.5f) rc_ax += 1.0f; else if (ex < -0.5f) rc_ax -= 1.0f;
+                                 if (ey > 0.5f) rc_ay += 1.0f; else if (ey < -0.5f) rc_ay -= 1.0f;
+@@ -1126,7 +1138,7 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
+                             rc_cand_x      = oe_x;
+                             rc_cand_y      = oe_y;
+                             rc_still_since = now | 1;
+-                        } else if (timer_elapsed32(rc_still_since) > ONE_EURO_REST_MS) {
++                        } else if (fb_elapsed32(rc_still_since) > ONE_EURO_REST_MS) {
+                             rc_anchored = true;
+                             rc_ax       = oe_x;
+                             rc_ay       = oe_y;
+@@ -1210,7 +1222,7 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
+                          * as the scroll stuttering or dropping out exactly
+                          * when moving quickly. The same presumption already
+                          * governs the scroll path below. */
+-                        if (two_class == TWO_UNDECIDED && touch_click_t != 0 && timer_elapsed32(touch_click_t) < DIGITIZER_MOUSE_RESCROLL_MS) {
++                        if (two_class == TWO_UNDECIDED && touch_click_t != 0 && fb_elapsed32(touch_click_t) < DIGITIZER_MOUSE_RESCROLL_MS) {
+                             two_class = TWO_SCROLL;
+                         }
+                         /* CLASSIFICATION WINDOW. While undecided, scroll is
+@@ -1243,7 +1255,7 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
+                                     /* pdx/pdy show how the pair is oriented:
+                                      * both large = diagonal (thumb ahead of
+                                      * index), one near zero = side by side. */
+-                                    uprintf("GCLS %s pacc=%d trav=%d gap=%d pdx=%d pdy=%d dt=%lu\n", two_class == TWO_ZOOM ? "zoom" : "scrl", pinch_acc, cls_travel, gap, abs(pdx), abs(pdy), pair_t ? timer_elapsed32(pair_t) : 0);
++                                    uprintf("GCLS %s pacc=%d trav=%d gap=%d pdx=%d pdy=%d dt=%lu\n", two_class == TWO_ZOOM ? "zoom" : "scrl", pinch_acc, cls_travel, gap, abs(pdx), abs(pdy), pair_t ? fb_elapsed32(pair_t) : 0);
+                                 }
+                             }
+                         }
+@@ -1269,7 +1281,7 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
+                     /* fresh gesture starts ANCHORED (wiggle absorber),
+                      * EXCEPT during rapid successive scrolling, and never
+                      * re-arms mid-gesture once escaped (count flapping) */
+-                    scr_anch    = timer_elapsed32(scroll_click_t) > 500 && !scr_esc;
++                    scr_anch    = fb_elapsed32(scroll_click_t) > 500 && !scr_esc;
+                     scr_ax      = cx;
+                     scr_ay      = cy;
+                     scr_still_t = 0;
+@@ -1287,7 +1299,7 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
+                         scr_cand_x  = cx;
+                         scr_cand_y  = cy;
+                         scr_still_t = timer_read32() | 1;
+-                    } else if (scr_still_t != 0 && timer_elapsed32(scr_still_t) > 300) {
++                    } else if (scr_still_t != 0 && fb_elapsed32(scr_still_t) > 300) {
+                         scr_anch     = true;
+                         scr_ax       = cx;
+                         scr_ay       = cy;
+@@ -1328,7 +1340,7 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
+                  * the divisor, magnitude intact (the host-side pixel
+                  * conversion honors it) - speed is linear in finger speed
+                  * at every speed, remainder carries, no rate ceiling. */
+-                if (timer_elapsed32(scroll_click_t) >= digitizer_scroll_interval_ms) {
++                if (fb_elapsed32(scroll_click_t) >= digitizer_scroll_interval_ms) {
+                     /* Spread each report across the ticks that follow it
+                      * instead of emitting it whole. The sensor speaks at
+                      * ~40Hz and we emit at ~125Hz, so dumping a report's
+@@ -1462,7 +1474,7 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
+                 contact_start_time = timer_read32();
+                 retouch_t          = 0;
+             } else if (contacts > 0 && retouch_t != 0) {
+-                const bool held  = timer_elapsed32(retouch_t) > DIGITIZER_MOUSE_RETAP_HOLD_MS;
++                const bool held  = fb_elapsed32(retouch_t) > DIGITIZER_MOUSE_RETAP_HOLD_MS;
+                 const bool moved = abs((int)x - retouch_x) > DIGITIZER_MOUSE_TAP_DISTANCE || abs((int)y - retouch_y) > DIGITIZER_MOUSE_TAP_DISTANCE;
+                 if (state == Tapped && (held || moved)) {
+                     state     = Drag;
+@@ -1556,7 +1568,7 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
+              * a 141-click drag coasted 1.0x - the fling had no relation to
+              * how hard it was thrown, because every launch velocity above
+              * a nudge hit the same clamp. */
+-            const uint32_t dtc = timer_elapsed32(coast_tick_t);
++            const uint32_t dtc = fb_elapsed32(coast_tick_t);
+             if (dtc >= (uint32_t)digitizer_scroll_interval_ms) {
+                 coast_tick_t = timer_read32();
+                 int g = (int)(dtc > 200 ? 200 : dtc);
+@@ -1594,7 +1606,7 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
+     static bool     tap      = false;
+     static uint32_t tap_time = 0;
+     if (tap_count) {
+-        if (timer_elapsed32(tap_time) > DIGITIZER_MOUSE_TAP_DURATION) {
++        if (fb_elapsed32(tap_time) > DIGITIZER_MOUSE_TAP_DURATION) {
+             tap = !tap;
+             if (!tap) {
+                 tap_count--;

@@ -1,0 +1,29 @@
+diff --git a/quantum/digitizer_mouse_fallback.c b/quantum/digitizer_mouse_fallback.c
+index 247bbc93..fea5f689 100644
+--- a/quantum/digitizer_mouse_fallback.c
++++ b/quantum/digitizer_mouse_fallback.c
+@@ -19,6 +19,15 @@
+ #        define DIGITIZER_MOUSE_TAP_DETECTION_TIMEOUT 150
+ #    endif
+ 
++/* Longest a finger may stay down and still count as a tap. Separate from
++ * the detection timeout above, which also sets how long a click waits
++ * after lift for a tap-and-drag: raising that one would delay every
++ * click. Measured on a Ploopy Pavonis: relaxed taps hold the pad for
++ * 120-210 ms, including the sensor's 40-60 ms lift-off fade. */
++#    ifndef DIGITIZER_MOUSE_TAP_HOLD_MS
++#        define DIGITIZER_MOUSE_TAP_HOLD_MS DIGITIZER_MOUSE_TAP_DETECTION_TIMEOUT
++#    endif
++
+ /* Two-finger tap judged at lift: window measured from when the PAIR
+  * formed (not the first finger), so a staggered second finger still
+  * right-clicks. Wider than the one-finger window, like Apple. */
+@@ -739,7 +748,7 @@ void digitizer_update_mouse_report(report_digitizer_t *report) {
+                 if (abs(cx - down2_cx) > 14 || abs(cy - down2_cy) > 14 || duration > DIGITIZER_MOUSE_TAP_DETECTION_TIMEOUT) {
+                     state = MoveScroll;
+                 }
+-            } else if (duration > DIGITIZER_MOUSE_TAP_DETECTION_TIMEOUT || distance_x > DIGITIZER_MOUSE_TAP_DISTANCE || distance_y > DIGITIZER_MOUSE_TAP_DISTANCE) {
++            } else if (duration > DIGITIZER_MOUSE_TAP_HOLD_MS || distance_x > DIGITIZER_MOUSE_TAP_DISTANCE || distance_y > DIGITIZER_MOUSE_TAP_DISTANCE) {
+                 state = MoveScroll;
+             }
+             break;
